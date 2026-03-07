@@ -12,7 +12,10 @@ namespace zygiskd {
 static std::string TMP_PATH;
 std::string kCPSocketName = (sizeof(void*) == 8) ? "cp64.sock" : "cp32.sock";
 
-void Init(const char *path) { TMP_PATH = path; }
+void Init(const char *path) {
+    TMP_PATH = path;
+    setenv("TMP_PATH", TMP_PATH.data(), 0);
+}
 
 std::string GetTmpPath() { return TMP_PATH; }
 
