@@ -3,9 +3,19 @@
 #include <linux/un.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <sys/mman.h>  // mmap, PROT_READ, MAP_SHARED, MAP_FAILED
+#include <sys/prctl.h> // Prctl
 
 #include "logging.hpp"
 #include "socket_utils.hpp"
+#include "shared_memory.hpp"
+
+zygisk::ZygiskSharedData* g_shared_data = nullptr;
+
+#ifndef PR_SET_VMA
+#define PR_SET_VMA 0x53564d41
+#define PR_SET_VMA_ANON_NAME 0
+#endif
 
 namespace zygiskd {
 static std::string TMP_PATH;
@@ -34,6 +44,50 @@ int Connect(uint8_t retry) {
 
     close(fd);
     return -1;
+}
+
+bool InitSharedMemory() {
+    UniqueFd fd = Connect(1);
+    if (fd == -1) {
+        LOGE("Failed to connect to daemon for shared memory.");
+        return false;
+    }
+
+    // 1. Request the shared memory file descriptor from the daemon
+    socket_utils::write_u8(fd, static_cast<uint8_t>(SocketAction::RequestSharedMemoryFd));
+
+    // 2. Read a status byte to check if the daemon is willing to provide the shared memory FD
+    uint8_t status = socket_utils::read_u8(fd);
+    
+    if (status == 1) {
+        // 3. The daemon agreed to provide the shared memory FD, we read it from the socket
+        int mem_fd = socket_utils::recv_fd(fd);
+        
+        if (mem_fd >= 0) {
+            // 4. Map the shared memory into our address space
+            void* map = mmap(nullptr, sizeof(zygisk::ZygiskSharedData), PROT_READ, MAP_SHARED, mem_fd, 0);
+            
+            close(mem_fd); // Close our copy of the FD, the mapping will remain valid
+            
+            if (map != MAP_FAILED) {
+                g_shared_data = static_cast<zygisk::ZygiskSharedData*>(map);
+                
+                // 5. Optionally, we can set a name for the VMA for easier debugging (this is not strictly necessary)
+                prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, g_shared_data, sizeof(zygisk::ZygiskSharedData), "jit-cache");
+                
+                LOGI("Shared memory initialized successfully! Magic: 0x%X", g_shared_data->magic);
+                return true;
+            } else {
+                LOGE("mmap failed for shared memory.");
+            }
+        } else {
+            LOGE("Failed to receive shared memory FD.");
+        }
+    } else {
+        LOGE("Daemon refused to provide shared memory FD.");
+    }
+    
+    return false;
 }
 
 bool PingHeartbeat() {
